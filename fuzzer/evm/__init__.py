@@ -27,6 +27,10 @@ from eth_utils import to_canonical_address, decode_hex, encode_hex
 from web3 import HTTPProvider
 from web3 import Web3
 
+from eth.typing import (
+    BaseOrSpoofTransaction,
+)
+
 from .storage_emulation import (
     FrontierVMForFuzzTesting,
     HomesteadVMForFuzzTesting,
@@ -110,12 +114,20 @@ class InstrumentedEVM:
                                    mix_hash=_block.mixHash,
                                    nonce=_block.nonce)
         self.vm = self.chain.get_vm(block_header)
+        self.storage_emulator.set_block_identifier(block_identifier)
 
     def execute(self, tx, debug=False):
         if debug:
             logging.getLogger('eth.vm.computation.Computation')
             logging.basicConfig(level=DEBUG2_LEVEL_NUM)
         return self.vm.state.apply_transaction(tx)
+    
+    def apply_transaction(
+            self,
+            transaction: BaseOrSpoofTransaction) -> 'BaseComputation':
+            print(transaction)
+            print('type of', type(self.vm.state))
+            return self.vm.state.apply_transaction(transaction)
 
     def reset(self):
         self.storage_emulator._raw_store_db.wrapped_db.rst()
@@ -183,6 +195,7 @@ class InstrumentedEVM:
             self.vm.state.fuzzed_blocknumber = None
 
         global_state = input["global_state"]
+        print(global_state)
         if "balance" in global_state and global_state["balance"] is not None:
             self.vm.state.fuzzed_balance = global_state["balance"]
         else:

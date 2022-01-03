@@ -3,11 +3,14 @@
 
 import random
 
+from hexbytes import HexBytes
+
 from eth import constants
 from eth._utils.address import force_bytes_to_address
+from eth.vm.computation import BaseComputation
 from eth_hash.auto import keccak
 from eth_typing import Address, Hash32
-from eth_utils import to_bytes, to_normalized_address, to_hex
+from eth_utils import to_bytes, to_normalized_address, to_hex, big_endian_to_int, int_to_big_endian
 
 from eth.chains.mainnet import MainnetHomesteadVM
 from eth.constants import BLANK_ROOT_HASH, EMPTY_SHA3
@@ -36,6 +39,7 @@ from web3 import HTTPProvider
 from web3 import Web3
 
 from utils import settings
+from .mutator import mutate_computation, log_computation_call
 
 global BLOCK_ID
 BLOCK_ID = "latest"
@@ -51,6 +55,7 @@ class EmulatorAccountDB(BaseAccountDB):
         self.state_root = BLANK_ROOT_HASH
         self._raw_store_db = db
         self.snapshot = None
+        self._block_id = BLOCK_ID
 
     def set_snapshot(self, snapshot):
         self.snapshot = snapshot
@@ -75,6 +80,9 @@ class EmulatorAccountDB(BaseAccountDB):
     def _code_storage_emulator(self):
         return self._raw_store_db["code"]
 
+    def set_block_identifier(self, block_identifier: int):
+        self._block_id = block_identifier
+
     def get_storage(self, address: Address, slot: int, from_journal: bool = True) -> int:
         validate_canonical_address(address, title="Storage Address")
         validate_uint256(slot, title="Storage Slot")
@@ -84,7 +92,7 @@ class EmulatorAccountDB(BaseAccountDB):
             except KeyError:
                 return 0
         else:
-            result = self._remote.getStorageAt(address, slot, "latest")
+            result = self._remote.getStorageAt(address, slot, self._block_id)
             result = to_int(result.hex())
             self.set_storage(address, slot, result)
             if self.snapshot != None:
@@ -112,7 +120,7 @@ class EmulatorAccountDB(BaseAccountDB):
         elif not self._remote:
             account = Account()
         else:
-            code = self._remote.getCode(address, BLOCK_ID)
+            code = self._remote.getCode(address, self._block_id)
             if code:
                 code_hash = keccak(code)
                 self._code_storage_emulator[code_hash] = code
@@ -121,8 +129,8 @@ class EmulatorAccountDB(BaseAccountDB):
             else:
                 code_hash = EMPTY_SHA3
             account = Account(
-                int(self._remote.getTransactionCount(address, BLOCK_ID)) + 1,
-                self._remote.getBalance(address, BLOCK_ID),
+                int(self._remote.getTransactionCount(address, self._block_id)),
+                self._remote.getBalance(address, self._block_id),
                 BLANK_ROOT_HASH,
                 code_hash
             )
@@ -138,6 +146,7 @@ class EmulatorAccountDB(BaseAccountDB):
         self._account_emulator[address] = account
 
     def get_nonce(self, address: Address) -> int:
+
         validate_canonical_address(address, title="Storage Address")
         a = self._get_account(address)
         return a.nonce
@@ -301,6 +310,11 @@ def fuzz_balance_opcode_fn(computation, opcode_fn) -> None:
     else:
         opcode_fn(computation=computation)
 
+def fuzz_apply_mutator(computation) -> None:
+    # is it a good way to pollute computation state
+    mutate_computation(computation)
+
+
 def fuzz_apply_computation(cls, state, message, transaction_context):
     cls = cls.__class__
     with cls(state, message, transaction_context) as computation:
@@ -332,27 +346,31 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
             previous_gas = computation.get_gas_remaining()
 
             try:
-                if   opcode == 0x42:  # TIMESTAMP
-                    fuzz_timestamp_opcode_fn(computation=computation)
-                elif opcode == 0x43:  # NUMBER
-                    fuzz_blocknumber_opcode_fn(computation=computation)
-                elif opcode == 0x31:  # BALANCE
-                    fuzz_balance_opcode_fn(computation=computation, opcode_fn=opcode_fn)
-                elif opcode == 0xf1: # CALL
-                    previous_call_address = fuzz_call_opcode_fn(computation=computation, opcode_fn=opcode_fn)
-                elif opcode == 0x3b: # EXTCODESIZE
-                    fuzz_extcodesize_opcode_fn(computation=computation, opcode_fn=opcode_fn)
-                elif opcode == 0x3d: # RETURNDATASIZE
-                    fuzz_returndatasize_opcode_fn(previous_call_address, computation=computation, opcode_fn=opcode_fn)
-                elif opcode == 0x20: # SHA3
-                    start_position, size = computation.stack_pop_ints(2)
-                    memory = computation.memory_read_bytes(start_position, size)
-                    computation.stack_push_int(size)
-                    computation.stack_push_int(start_position)
-                    opcode_fn(computation=computation)
-                else:
-                    opcode_fn(computation=computation)
+
+                # if   opcode == 0x42:  # TIMESTAMP
+                #     fuzz_timestamp_opcode_fn(computation=computation)
+                # elif opcode == 0x43:  # NUMBER
+                #     fuzz_blocknumber_opcode_fn(computation=computation)
+                # elif opcode == 0x31:  # BALANCE
+                #     fuzz_balance_opcode_fn(computation=computation, opcode_fn=opcode_fn)
+                # elif opcode == 0xf1: # CALL
+                #     previous_call_address = fuzz_call_opcode_fn(computation=computation, opcode_fn=opcode_fn)
+                # elif opcode == 0x3b: # EXTCODESIZE
+                #     fuzz_extcodesize_opcode_fn(computation=computation, opcode_fn=opcode_fn)
+                # elif opcode == 0x3d: # RETURNDATASIZE
+                #     fuzz_returndatasize_opcode_fn(previous_call_address, computation=computation, opcode_fn=opcode_fn)
+                # elif opcode == 0x20: # SHA3
+                #     start_position, size = computation.stack_pop_ints(2)
+                #     memory = computation.memory_read_bytes(start_position, size)
+                #     computation.stack_push_int(size)
+                #     computation.stack_push_int(start_position)
+                #     opcode_fn(computation=computation)
+                # else:
+                opcode_fn(computation=computation)
             except Halt:
+                # print(computation.output)
+                mutate_computation(computation)
+                # log_computation_call(computation)
                 break
             finally:
                 computation.trace.append(
@@ -368,8 +386,38 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
                     }
                 )
                 previous_stack = list(computation._stack.values)
+        # print("computation halt!", computation.output, computation.is_origin_computation)
     return computation
 
+## records
+
+def record_logs(computation: BaseComputation, log_size: int) -> BaseComputation:
+    start_position, size = computation.stack_pop_ints(2)
+    topics = []
+    for i in range(log_size):
+        topic = computation.stack_pop1_any()
+        topics.append(topic)
+    hex_topics = []
+    for topic in topics[::-1]:
+        if type(topic) is int:
+            hex_topics.append(to_hex(topic))
+            computation.stack_push_int(topic)
+        else:
+            hex_topics.append(topic.hex())
+            computation.stack_push_bytes(topic)
+    print('record_logs', 'size', log_size, 'len topcis', len(topics))
+
+
+    computation.stack_push_int(size)
+    computation.stack_push_int(start_position)
+
+    computation.events.append({
+        'address': to_normalized_address(computation.msg.storage_address),
+        'data': to_hex(computation.memory_read_bytes(start_position, size)),
+        'logIndex': len(computation.events),
+        'topcis': hex_topics[::-1],
+    })
+    return computation
 # VMs
 
 # FRONTIER
