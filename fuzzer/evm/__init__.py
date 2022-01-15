@@ -13,32 +13,45 @@ from eth.chains.mainnet import (
     TANGERINE_WHISTLE_MAINNET_BLOCK,
     SPURIOUS_DRAGON_MAINNET_BLOCK,
     BYZANTIUM_MAINNET_BLOCK,
-    PETERSBURG_MAINNET_BLOCK
+    PETERSBURG_MAINNET_BLOCK,
+    LONDON_MAINNET_BLOCK,
+    ARROW_GLACIER_MAINNET_BLOCK
 )
 from eth.constants import ZERO_ADDRESS, CREATE_CONTRACT_ADDRESS
 from eth.db.atomic import AtomicDB
 from eth.db.backends.memory import MemoryDB
 from eth.rlp.accounts import Account
 from eth.rlp.headers import BlockHeader
-from eth.tools.logging import DEBUG2_LEVEL_NUM
+# from eth.tools.logging import DEBUG2_LEVEL_NUM
 from eth.validation import validate_uint256
-from eth.vm.spoof import SpoofTransaction
 from eth_utils import to_canonical_address, decode_hex, encode_hex
 from web3 import HTTPProvider
 from web3 import Web3
 
-from eth.typing import (
-    BaseOrSpoofTransaction,
+from eth.abc import (
+    BlockHeaderAPI,
+    ComputationAPI,
+    SignedTransactionAPI,
+    ReceiptAPI
 )
 
+from typing import Tuple
+
 from .storage_emulation import (
+    ArrowGlacierVMForFuzzTesting,
     FrontierVMForFuzzTesting,
     HomesteadVMForFuzzTesting,
+    LondonVMForFuzzTesting,
     TangerineWhistleVMForFuzzTesting,
     SpuriousDragonVMForFuzzTesting,
     ByzantiumVMForFuzzTesting,
-    PetersburgVMForFuzzTesting
+    PetersburgVMForFuzzTesting,
+    EmulatorAccountDB
 )
+
+from eth.vm.forks.london.headers import LondonBlockHeader
+from .mutator.types import MutatorParams
+
 
 from utils import settings
 from utils.utils import initialize_logger
@@ -54,6 +67,8 @@ class InstrumentedEVM:
                 (SPURIOUS_DRAGON_MAINNET_BLOCK, SpuriousDragonVMForFuzzTesting),
                 (BYZANTIUM_MAINNET_BLOCK, ByzantiumVMForFuzzTesting),
                 (PETERSBURG_MAINNET_BLOCK, PetersburgVMForFuzzTesting),
+                (LONDON_MAINNET_BLOCK, LondonVMForFuzzTesting),
+                (ARROW_GLACIER_MAINNET_BLOCK, ArrowGlacierVMForFuzzTesting)
             ),
         )
         class MyMemoryDB(MemoryDB):
@@ -66,6 +81,7 @@ class InstrumentedEVM:
         else:
             self.w3 = None
         self.chain = chain_class.from_genesis_header(AtomicDB(MyMemoryDB()), MAINNET_GENESIS_HEADER)
+        print('type of chain:', self.chain)
         self.logger = initialize_logger("EVM")
         self.accounts = list()
         self.snapshot = None
@@ -82,10 +98,14 @@ class InstrumentedEVM:
         return block
 
     @property
-    def storage_emulator(self):
+    def storage_emulator(self) -> EmulatorAccountDB:
         return self.vm.state._account_db
 
+    def set_mutator_params(self, params: MutatorParams):
+        self.mutator_params = params
+
     def set_vm(self, block_identifier='latest'):
+        print('set vm: ', block_identifier)
         _block = None
         if self.w3:
             if block_identifier == 'latest':
@@ -93,41 +113,73 @@ class InstrumentedEVM:
             validate_uint256(block_identifier)
             _block = self.w3.eth.getBlock(block_identifier)
         if not _block:
-            if block_identifier in [HOMESTEAD_MAINNET_BLOCK, BYZANTIUM_MAINNET_BLOCK,PETERSBURG_MAINNET_BLOCK]:
+            if block_identifier in [HOMESTEAD_MAINNET_BLOCK, BYZANTIUM_MAINNET_BLOCK,PETERSBURG_MAINNET_BLOCK, LONDON_MAINNET_BLOCK]:
                 _block = self.get_cached_block_by_id(block_identifier)
             else:
                 self.logger.error("Unknown block identifier.")
                 sys.exit(-4)
-        block_header = BlockHeader(difficulty=_block.difficulty,
-                                   block_number=_block.number,
-                                   gas_limit=_block.gasLimit,
-                                   timestamp=_block.timestamp,
-                                   coinbase=ZERO_ADDRESS,  # default value
-                                   parent_hash=_block.parentHash,
-                                   uncles_hash=_block.uncles,
-                                   state_root=_block.stateRoot,
-                                   transaction_root=_block.transactionsRoot,
-                                   receipt_root=_block.receiptsRoot,
-                                   bloom=0,  # default value
-                                   gas_used=_block.gasUsed,
-                                   extra_data=_block.extraData,
-                                   mix_hash=_block.mixHash,
-                                   nonce=_block.nonce)
+        child_block = self.w3.eth.getBlock(block_identifier + 1)
+        self._block = _block
+        # print(type(_block))
+        if hasattr(_block, 'baseFeePerGas'):
+            block_header = LondonBlockHeader(difficulty=_block.difficulty,
+                                            block_number=_block.number,
+                                            gas_limit=child_block.gasLimit,
+                                            timestamp=child_block.timestamp,
+                                            coinbase=to_canonical_address(_block.miner),  # default value
+                                            parent_hash=_block.parentHash,
+                                            uncles_hash=_block.uncles,
+                                             state_root=_block.stateRoot,
+                                            # state_root = parent_block.stateRoot,
+                                            transaction_root=_block.transactionsRoot,
+                                            receipt_root=_block.receiptsRoot,
+                                            bloom=0,  # default value
+                                            gas_used=0, # set to zero
+                                            extra_data=_block.extraData,
+                                            mix_hash=_block.mixHash,
+                                            nonce=_block.nonce,
+                                            base_fee_per_gas=child_block['baseFeePerGas'],
+                                    )
+        else:
+            block_header = BlockHeader(difficulty=_block.difficulty,
+                                        block_number=_block.number,
+                                        gas_limit=_block.gasLimit,
+                                        timestamp=_block.timestamp,
+                                        coinbase=ZERO_ADDRESS,  # default value
+                                        parent_hash=_block.parentHash,
+                                        uncles_hash=_block.uncles,
+                                        state_root=_block.stateRoot,
+                                        transaction_root=_block.transactionsRoot,
+                                        receipt_root=_block.receiptsRoot,
+                                        bloom=0,  # default value
+                                        gas_used=0,  # set to zero
+                                        extra_data=_block.extraData,
+                                        mix_hash=_block.mixHash,
+                                        nonce=_block.nonce,
+                                    )
+        # print('get vm:', block_header)
         self.vm = self.chain.get_vm(block_header)
-        self.storage_emulator.set_block_identifier(block_identifier)
+        self.storage_emulator.set_block_identifier(
+            block_identifier, 0)
+        self.storage_emulator.set_block_header(block_header)
 
-    def execute(self, tx, debug=False):
+    def execute(self, tx: SignedTransactionAPI, debug=False):
+        if hasattr(self, 'mutator_params'):
+            self.vm.state.mutator_params = self.mutator_params
         if debug:
             logging.getLogger('eth.vm.computation.Computation')
-            logging.basicConfig(level=DEBUG2_LEVEL_NUM)
+            # logging.basicConfig(level=DEBUG2_LEVEL_NUM)
+
         return self.vm.state.apply_transaction(tx)
-    
-    def apply_transaction(
-            self,
-            transaction: BaseOrSpoofTransaction) -> 'BaseComputation':
-            print(transaction)
-            print('type of', type(self.vm.state))
-            return self.vm.state.apply_transaction(transaction)
+
+
+    def apply_transaction(self,
+                          header: BlockHeaderAPI,
+                          transaction: SignedTransactionAPI
+                          ) -> Tuple[ReceiptAPI, ComputationAPI]:
+
+        
+        return self.vm.state.apply_transaction(transaction)
 
     def reset(self):
         self.storage_emulator._raw_store_db.wrapped_db.rst()
@@ -195,7 +247,6 @@ class InstrumentedEVM:
             self.vm.state.fuzzed_blocknumber = None
 
         global_state = input["global_state"]
-        print(global_state)
         if "balance" in global_state and global_state["balance"] is not None:
             self.vm.state.fuzzed_balance = global_state["balance"]
         else:
@@ -241,6 +292,10 @@ class InstrumentedEVM:
             self.set_vm(BYZANTIUM_MAINNET_BLOCK)
         elif EVM_VERSION == "petersburg":
             self.set_vm(PETERSBURG_MAINNET_BLOCK)
+        elif EVM_VERSION == 'london':
+            self.set_vm(LONDON_MAINNET_BLOCK)
+        elif EVM_VERSION == 'arrow_glacier':
+            self.set_vm(ARROW_GLACIER_MAINNET_BLOCK)
         else:
             raise Exception("Unknown EVM version, please choose either 'homestead', 'byzantium' or 'petersburg'.")
 

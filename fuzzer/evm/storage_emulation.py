@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import random
+from eth.abc import BlockHeaderAPI
 
 from hexbytes import HexBytes
+from typing import Optional, Set, cast
+from copy import deepcopy
 
 from eth import constants
 from eth._utils.address import force_bytes_to_address
@@ -14,14 +17,30 @@ from eth_utils import to_bytes, to_normalized_address, to_hex, big_endian_to_int
 
 from eth.chains.mainnet import MainnetHomesteadVM
 from eth.constants import BLANK_ROOT_HASH, EMPTY_SHA3
-from eth.db import BaseAtomicDB
-from eth.db.account import BaseAccountDB
-from eth.db.typing import JournalDBCheckpoint
+from eth.db.backends.base import BaseAtomicDB
+from eth.db.account import AccountDB
+from eth.typing import JournalDBCheckpoint
 from eth.rlp.accounts import Account
 from eth.tools._utils.normalization import to_int
 from eth.validation import validate_uint256, validate_canonical_address, validate_is_bytes
 
-from eth.vm.forks import FrontierVM, TangerineWhistleVM, SpuriousDragonVM, ByzantiumVM, PetersburgVM
+
+from eth.vm.forks import FrontierVM, TangerineWhistleVM, SpuriousDragonVM, ByzantiumVM, PetersburgVM, LondonVM, ArrowGlacierVM
+from eth.vm.forks.arrow_glacier import ArrowGlacierState
+from eth.vm.forks.arrow_glacier.computation import ArrowGlacierComputation
+
+from eth.vm.logic.invalid import (
+    InvalidOpcode,
+)
+
+from eth.exceptions import (
+    Halt,
+    VMError,
+)
+
+
+from eth.vm.forks.london import LondonState
+from eth.vm.forks.london.computation import LondonComputation
 from eth.vm.forks.byzantium import ByzantiumState
 from eth.vm.forks.byzantium.computation import ByzantiumComputation
 from eth.vm.forks.frontier import FrontierState
@@ -35,8 +54,11 @@ from eth.vm.forks.spurious_dragon.computation import SpuriousDragonComputation
 from eth.vm.forks.tangerine_whistle import TangerineWhistleState
 from eth.vm.forks.tangerine_whistle.computation import TangerineWhistleComputation
 
+
+
 from web3 import HTTPProvider
 from web3 import Web3
+
 
 from utils import settings
 from .mutator import mutate_computation, log_computation_call
@@ -45,7 +67,9 @@ global BLOCK_ID
 BLOCK_ID = "latest"
 
 # STORAGE EMULATOR
-class EmulatorAccountDB(BaseAccountDB):
+
+
+class EmulatorAccountDB(AccountDB):
     def __init__(self, db: BaseAtomicDB, state_root: Hash32 = BLANK_ROOT_HASH) -> None:
         if settings.REMOTE_FUZZING and settings.RPC_HOST and settings.RPC_PORT:
             self._w3 = Web3(HTTPProvider('http://%s:%s' % (settings.RPC_HOST, settings.RPC_PORT)))
@@ -56,6 +80,11 @@ class EmulatorAccountDB(BaseAccountDB):
         self._raw_store_db = db
         self.snapshot = None
         self._block_id = BLOCK_ID
+        self._base_fee_per_gas = None
+
+        self._dirty_accounts: Set[Address] = set()
+        self._reset_access_counters()
+
 
     def set_snapshot(self, snapshot):
         self.snapshot = snapshot
@@ -80,8 +109,13 @@ class EmulatorAccountDB(BaseAccountDB):
     def _code_storage_emulator(self):
         return self._raw_store_db["code"]
 
-    def set_block_identifier(self, block_identifier: int):
+    def set_block_header(self, header: BlockHeaderAPI):
+        self._block = header
+
+    def set_block_identifier(self, block_identifier: int, base_fee_per_gas: Optional[int] = None):
         self._block_id = block_identifier
+        if base_fee_per_gas:
+            self._base_fee_per_gas = base_fee_per_gas
 
     def get_storage(self, address: Address, slot: int, from_journal: bool = True) -> int:
         validate_canonical_address(address, title="Storage Address")
@@ -108,6 +142,8 @@ class EmulatorAccountDB(BaseAccountDB):
         if address not in self._storage_emulator:
             self._storage_emulator[address] = dict()
         self._storage_emulator[address][slot] = value
+
+        self._dirty_accounts.add(address)
 
     def delete_storage(self, address: Address) -> None:
         validate_canonical_address(address, title="Storage Address")
@@ -139,6 +175,7 @@ class EmulatorAccountDB(BaseAccountDB):
             self._set_account(address, account)
         return account
 
+
     def _has_account(self, address: Address) -> bool:
         return address in self._account_emulator
 
@@ -146,7 +183,6 @@ class EmulatorAccountDB(BaseAccountDB):
         self._account_emulator[address] = account
 
     def get_nonce(self, address: Address) -> int:
-
         validate_canonical_address(address, title="Storage Address")
         a = self._get_account(address)
         return a.nonce
@@ -163,6 +199,7 @@ class EmulatorAccountDB(BaseAccountDB):
 
     def get_balance(self, address: Address) -> int:
         validate_canonical_address(address, title="Storage Address")
+        print('get balance', to_normalized_address(address), self._get_account(address).balance)
         return self._get_account(address).balance
 
     def set_balance(self, address: Address, balance: int) -> None:
@@ -235,11 +272,21 @@ class EmulatorAccountDB(BaseAccountDB):
     def commit(self, checkpoint: JournalDBCheckpoint) -> None:
         pass
 
+    def mark_storage_warm(self, address: Address, slot: int) -> None:
+        return None
+
+
     def make_state_root(self) -> Hash32:
         return None
 
     def persist(self) -> None:
-        pass
+        # reset local storage trackers
+        print('call to persist')
+        self._account_stores = {}
+        self._dirty_accounts = set()
+        self._accessed_accounts = set()
+        self._accessed_bytecodes = set()
+
 
     def has_root(self, state_root: bytes) -> bool:
         return False
@@ -253,6 +300,7 @@ def get_block_hash_for_testing(self, block_number):
         return keccak(to_bytes(text="{0}".format(block_number)))
 
 def fuzz_timestamp_opcode_fn(computation) -> None:
+    print('computation. timestamp', computation.state.timestamp)
     if settings.ENVIRONMENTAL_INSTRUMENTATION and hasattr(computation.state, "fuzzed_timestamp") and computation.state.fuzzed_timestamp is not None:
         computation.stack_push_int(computation.state.fuzzed_timestamp)
     else:
@@ -312,11 +360,17 @@ def fuzz_balance_opcode_fn(computation, opcode_fn) -> None:
 
 def fuzz_apply_mutator(computation) -> None:
     # is it a good way to pollute computation state
-    mutate_computation(computation)
+    if hasattr(computation.state, "mutator_params"):
+        mutate_computation(computation, computation.state.mutator_params)
+    else:
+        mutate_computation(computation, None)
+    # else:
+    #     raise Exception("mutator_params not found")
 
 
+@classmethod
 def fuzz_apply_computation(cls, state, message, transaction_context):
-    cls = cls.__class__
+    
     with cls(state, message, transaction_context) as computation:
 
         # Early exit on pre-compiles
@@ -325,30 +379,36 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
         if precompile is not NO_RESULT:
             precompile(computation)
             return computation
+        show_debug2 = computation.logger.show_debug2
 
-        opcode_lookup = computation.opcodes
         computation.trace = list()
         previous_stack = []
-        previous_call_address = None
-        memory = None
-
+        opcode_lookup = computation.opcodes
         for opcode in computation.code:
             try:
                 opcode_fn = opcode_lookup[opcode]
             except KeyError:
-                from eth.vm.logic.invalid import InvalidOpcode
                 opcode_fn = InvalidOpcode(opcode)
 
-            from eth.exceptions import Halt
-            from copy import deepcopy
+            if show_debug2:
+                # We dig into some internals for debug logs
+                base_comp = cast(BaseComputation, computation)
+                computation.logger.debug2(
+                    "OPCODE: 0x%x (%s) | pc: %s | stack: %s",
+                    opcode,
+                    opcode_fn.mnemonic,
+                    max(0, computation.code.program_counter - 1),
+                    base_comp._stack,
+                )
 
-            previous_pc = computation.code.pc
+
+            memory = None
+            previous_pc = computation.code.program_counter
             previous_gas = computation.get_gas_remaining()
-
             try:
 
-                # if   opcode == 0x42:  # TIMESTAMP
-                #     fuzz_timestamp_opcode_fn(computation=computation)
+                if   opcode == 0x42:  # TIMESTAMP
+                    fuzz_timestamp_opcode_fn(computation=computation)
                 # elif opcode == 0x43:  # NUMBER
                 #     fuzz_blocknumber_opcode_fn(computation=computation)
                 # elif opcode == 0x31:  # BALANCE
@@ -368,8 +428,7 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
                 # else:
                 opcode_fn(computation=computation)
             except Halt:
-                # print(computation.output)
-                mutate_computation(computation)
+                fuzz_apply_mutator(computation)
                 # log_computation_call(computation)
                 break
             finally:
@@ -382,12 +441,12 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
                         "stack": previous_stack,
                         "memory": memory,
                         "gas": computation.get_gas_remaining(),
-                        "gas_used_by_opcode" : previous_gas - computation.get_gas_remaining()
+                        "gas_used_by_opcode": previous_gas - computation.get_gas_remaining()
                     }
                 )
                 previous_stack = list(computation._stack.values)
-        # print("computation halt!", computation.output, computation.is_origin_computation)
     return computation
+
 
 ## records
 
@@ -514,4 +573,38 @@ PetersburgStateForFuzzTesting = PetersburgState.configure(
 PetersburgVMForFuzzTesting = PetersburgVM.configure(
     __name__='PetersburgVMForFuzzTesting',
     _state_class=PetersburgStateForFuzzTesting,
+)
+
+
+# LONDON
+LondonComputationForFuzzTesting = LondonComputation.configure(
+    __name__='LondonComputationForFuzzTesting',
+    apply_computation=fuzz_apply_computation,
+)
+LondonStateForFuzzTesting = LondonState.configure(
+    __name__='LondonStateForFuzzTesting',
+    get_ancestor_hash=get_block_hash_for_testing,
+    computation_class=LondonComputationForFuzzTesting,
+    account_db_class=EmulatorAccountDB,
+)
+LondonVMForFuzzTesting = LondonVM.configure(
+    __name__='LondonVMForFuzzTesting',
+    _state_class=LondonStateForFuzzTesting,
+)
+
+
+# ArrowGlacier
+ArrowGlacierComputationForFuzzTesting = ArrowGlacierComputation.configure(
+    __name__='LondonComputationForFuzzTesting',
+    apply_computation=fuzz_apply_computation,
+)
+ArrowGlacierStateForFuzzTesting = ArrowGlacierState.configure(
+    __name__='ArrowGlacierStateForFuzzTesting',
+    get_ancestor_hash=get_block_hash_for_testing,
+    computation_class=ArrowGlacierComputationForFuzzTesting,
+    account_db_class=EmulatorAccountDB,
+)
+ArrowGlacierVMForFuzzTesting = ArrowGlacierVM.configure(
+    __name__='ArrowGlacierVMForFuzzTesting',
+    _state_class=ArrowGlacierStateForFuzzTesting,
 )

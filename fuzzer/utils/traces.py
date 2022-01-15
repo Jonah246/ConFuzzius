@@ -4,6 +4,8 @@ from web3._utils.events import get_event_data
 from eth_abi.codec import (
     ABICodec,
 )
+from web3 import Web3
+import re
 
 from web3.types import (
     ABIEvent,
@@ -48,6 +50,16 @@ def convert_event(log: Tuple[bytes, Tuple[int, ...], bytes]) -> LogReceipt:
         )
     return log_receipt
 
+def get_revert_reason(output: bytes):
+    shrimp_output = output[68:]
+    if len(shrimp_output) % 2 != 0:
+        shrimp_output = shrimp_output + bytes(0)
+    try:
+        msg = Web3.toText(shrimp_output)
+        return msg
+    except Exception as e:
+        print(e)
+        return output
 
 def collect_event(codec: ABICodec, logs: Tuple[Tuple[bytes, Tuple[int, ...], bytes], ...], event_type='transfer'):
     erc20_transfer_abi = json.loads('{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"from","type":"address"},{"indexed":true,"internalType":"address","name":"to","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Transfer","type":"event"}')

@@ -4,7 +4,7 @@
 import logging
 
 # Ethereum VM ('homestead', 'byzantium' or 'petersburg')
-EVM_VERSION = "petersburg"
+EVM_VERSION = "arrow_glacier"
 # Size of population
 POPULATION_SIZE = None
 # Number of generations
@@ -38,6 +38,6 @@ RPC_HOST = 'localhost'
 # RPC Port
 RPC_PORT = 8545
 # True = Remote fuzzing, False = Local fuzzing
-REMOTE_FUZZING = False
+REMOTE_FUZZING = True
 # True = Environmental instrumentation enabled, False = Environmental instrumentation disabled
 ENVIRONMENTAL_INSTRUMENTATION = True

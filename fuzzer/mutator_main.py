@@ -4,6 +4,17 @@ import random
 import json
 
 from eth.vm.computation import BaseComputation
+from typing import Union, Optional
+from eth_typing import (
+    Address,
+    BlockNumber,
+    ChecksumAddress,
+    Hash32,
+    HexStr,
+    # TxData
+)
+from web3.types import TxData
+from z3.z3 import Bool
 
 # from z3 import Solver
 
@@ -18,7 +29,9 @@ from detectors import DetectorExecutor
 from eth.vm.spoof import SpoofTransaction
 from evm.storage_emulation import BLOCK_ID
 
-from utils.traces import collect_event
+from utils.traces import collect_event, get_revert_reason
+
+from evm.mutator.types import MutatorParams, AttackParams
 
 from main import Fuzzer
 
@@ -32,7 +45,45 @@ from utils.control_flow_graph import ControlFlowGraph
 seed = random.random()
 random.seed(seed)
 
-# solver = Solver()
+def detection_compare_revert_and_transfers(normal_transfers, transfers):
+
+    if len(transfers) != len(normal_transfers):
+        return {
+            'type': 'different_transfers',
+            'msg': 'normal traces has {} transfers; mutated traces has {} transfers'.format(
+            len(normal_transfers), len(transfers))
+        }
+
+    inconsists = []
+    
+    for i in range(len(normal_transfers)):
+        normal = normal_transfers[i]
+        mutated = transfers[i]
+
+        if normal['address'] != mutated['address']:
+            inconsists.append('source address inconsists at log Index: {}\n normal: {}, mutated: {}'.format(
+                i, normal['address'], mutated['address']))
+            continue
+
+        if normal['args']['from'] != mutated['args']['from']:
+            inconsists.append('from address inconsists at log Index: {}\n normal: {}, mutated: {}'.format(
+                i, normal['args']['from'], mutated['args']['from']))
+        
+        if normal['args']['to'] != mutated['args']['to']:
+            inconsists.append('to address inconsists at log Index: {}\n normal: {}, mutated: {}'.format(
+                i, normal['args']['to'], mutated['args']['to']))
+        
+        if normal['args']['value'] != mutated['args']['value']:
+            inconsists.append('Transfer value inconsists at log Index: {}\n normal: {}, mutated: {}'.format(
+                i, normal['args']['value'], mutated['args']['value'])) 
+    if len(inconsists) == 0:
+        return {}
+
+    return {
+        'type': 'value-inconsists',
+        'msg': json.dumps(inconsists),
+    }
+
 
 class MockArgs:
     def __init__(self, source, abi, contract):
@@ -43,7 +94,7 @@ class MockArgs:
 
 # fork from Fuzzer
 class Mutator:
-    def __init__(self, tx, test_instrumented_evm: InstrumentedEVM):
+    def __init__(self, test_instrumented_evm: InstrumentedEVM):
         global logger
 
         logger = initialize_logger("Mutator  ")
@@ -53,39 +104,123 @@ class Mutator:
 
         # Initialize results
         self.results = {"errors": {}}
-        self.tx = tx
         self.w3 = test_instrumented_evm.w3
-        self.w3.eth.getTransactionReceipt
+    
+    def set_params(self, mutatorParams: MutatorParams):
+        self.instrumented_evm.set_mutator_params(mutatorParams)
 
-    def run(self) -> BaseComputation:
-        from_account = to_canonical_address(decode_hex(self.tx['from']))
-        self.instrumented_evm.set_vm(self.tx.blockNumber - 1)
-        print(self.tx['nonce'], self.instrumented_evm.vm.state.get_nonce(from_account))
-        tx = self.instrumented_evm.vm.create_unsigned_transaction(
-            nonce=self.tx['nonce'],
-            gas_price=self.tx['gasPrice'],
-            gas=self.tx['gas'],
-            to=to_canonical_address(self.tx['to']),
-            value=self.tx['value'],
-            data=decode_hex(self.tx['input'])
+    """
+        run_tx executes trace_trasaction in the instrumented_evm
+        @params: params: MutatorParams indicates the rules for mutator to mutate
+        @params: discatd_state_change: whether to disard the state change of the current transacion.
+    """
+    def run_tx(
+        self, tx_hash: Union[HexStr, Hash32],
+        params: Optional[MutatorParams] = None,
+        discard_state_change: Optional[Bool] = True) -> BaseComputation:
+        if params:
+            self.set_params(params)
+        tx = self.w3.eth.get_transaction(tx_hash)
+
+        from_account = to_canonical_address(tx['from'])
+        
+        base_unsigned_tx = self.instrumented_evm.vm.create_unsigned_transaction(
+            nonce=tx['nonce'],
+            gas_price=tx['gasPrice'],
+            gas=tx['gas'],
+            to=to_canonical_address(tx['to']),
+            value=tx['value'],
+            data=decode_hex(tx['input'])
         )
-        tx = SpoofTransaction(tx, from_=from_account)
-        BLOCK_ID = self.tx.blockNumber - 1
-        return self.instrumented_evm.execute(tx, False)
+        BLOCK_ID = tx.blockNumber
+
+        self.instrumented_evm.set_vm(BLOCK_ID)
+        self.instrumented_evm.restore_from_snapshot()
+        spoof_tx = SpoofTransaction(base_unsigned_tx, from_=from_account)
+
+        result = self.instrumented_evm.execute(
+            spoof_tx,
+            debug=False)
+        return result
+
+    def run_raw_tx(self, tx: TxData) -> BaseComputation:
+        from_account = to_canonical_address(tx['from'])
+        
+        base_unsigned_tx = self.instrumented_evm.vm.create_unsigned_transaction(
+            nonce=tx['nonce'],
+            gas_price=tx['gasPrice'],
+            gas=tx['gas'],
+            to=to_canonical_address(tx['to']),
+            value=tx['value'],
+            data=decode_hex(tx['input']),
+        )
+        # self.instrumented_evm.create_snapshot()
+        result = self.instrumented_evm.execute(
+            SpoofTransaction(base_unsigned_tx, from_=from_account),
+            debug=False)
+        return result
+
+    def trace_block(
+        self, block_number: BlockNumber
+    ):
+        block = self.w3.eth.get_block(block_number)
+        BLOCK_ID = block_number - 1
+        self.instrumented_evm.set_vm(BLOCK_ID)
+        txs = block['transactions']
+        for tx_hash in txs[:4]:
+            tx = self.w3.eth.get_transaction(tx_hash)
+            receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            print('receipt status:', receipt['status'], tx_hash.hex())
+
+            result = self.run_raw_tx(tx)
+            print(result.is_success, receipt['status'])
+
+            if result.is_error:
+                print(result._error)
+                print('revert', get_revert_reason(result.output))
+
 
 
 
 instrumented_evm = InstrumentedEVM(settings.RPC_HOST, settings.RPC_PORT)
 instrumented_evm.set_vm_by_name(settings.EVM_VERSION)
-tx_hash = '0xa07d381e9f1ebe49c26735118798449f35975e0baa2bd174a7e3c976583b7e61'
+# instrumented_evm.set_vm_by_name()
+instrumented_evm.create_snapshot()
+
+# tx_hash = '0xa07d381e9f1ebe49c26735118798449f35975e0baa2bd174a7e3c976583b7e61'
+tx_hash = '0x40967af3e2db0f16ca84c55807cdad2adca03cc07ae5b06e5e61b63ddb2b768c'
 
 tx = instrumented_evm.w3.eth.getTransaction(tx_hash)
-mutator = Mutator(tx, instrumented_evm)
-result = mutator.run()
-# print('type', type(result), result.output, result.is_success)
-# print(type(result.trace))
-import json
-# List[Tuple[Address, Tuple[int, ...], bytes]]
-logs = result.get_log_entries()
-# print(result.trace)
-print(collect_event(mutator.w3.codec, logs))
+
+mutator_params = MutatorParams(
+        attackRules=[
+            AttackParams(
+                address="0xb6c057591E073249F2D9D88Ba59a46CFC9B59EdB"
+                ,mutateRate=0.5)
+])
+mutator = Mutator(instrumented_evm,)
+
+mutator.trace_block(9964000)
+# result = mutator.run_tx(tx_hash, mutator_params)
+
+# if not result.is_success:
+#     print('revert', get_revert_reason(result.output))
+# logs = result.get_log_entries()
+# pre_events = collect_event(mutator.w3.codec, logs)
+
+# mutator_params = MutatorParams(
+#         attackRules=[
+#             AttackParams(
+#                 address="0xb6c057591E073249F2D9D88Ba59a46CFC9B59EdB"
+#                 ,mutateRate=0.9)
+# ])
+
+# result = mutator.run_tx(tx_hash, mutator_params)
+# if not result.is_success:
+#     print('revert', get_revert_reason(result.output))
+# logs = result.get_log_entries()
+# post_events = collect_event(mutator.w3.codec, logs)
+
+# print(detection_compare_revert_and_transfers(post_events, pre_events))
+
+
