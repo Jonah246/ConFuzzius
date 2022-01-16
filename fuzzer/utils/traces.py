@@ -34,6 +34,26 @@ def pact_to_byte32(data: bytes) -> HexBytes:
         return HexBytes(bytes(32 - len(data)) + data)
     return HexBytes(data)
 
+def stack_item_to_hex(item):
+    if item[0] == bytes:
+        return pact_to_byte32(item[1]).hex()[2:]
+    else:
+        return pact_to_byte32(HexBytes(int_to_big_endian(item[1]))).hex()[2:]
+
+def trace_to_json(trace: List):
+    serializable_list = []
+   
+    for step in trace:
+        if 'stack' in step.keys():
+            stacks = [] 
+            for item in step['stack']:
+                stacks.append(stack_item_to_hex(item))
+            step['stack'] = stacks
+            serializable_list.append(step)
+    return json.dumps(serializable_list)
+
+
+
 def convert_event(log: Tuple[bytes, Tuple[int, ...], bytes]) -> LogReceipt:
     address, topics, data = log
     topics = [pact_to_byte32(HexBytes(int_to_big_endian(topic))) for topic in topics]

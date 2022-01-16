@@ -6,6 +6,7 @@ from eth_utils import to_bytes, to_normalized_address, to_hex, big_endian_to_int
 
 
 from utils import settings
+from utils.traces import stack_item_to_hex
 
 from eth.vm.logic.invalid import (
     InvalidOpcode,
@@ -78,7 +79,6 @@ def fuzz_apply_mutator(computation) -> None:
         mutate_computation(computation, None)
 
 def timestamp_opcode_fn(computation) -> None:
-    print('computation. timestamp', computation.state.timestamp)
     if settings.ENVIRONMENTAL_INSTRUMENTATION and hasattr(computation.state, "fuzzed_timestamp") and computation.state.fuzzed_timestamp is not None:
         computation.stack_push_int(computation.state.fuzzed_timestamp)
     else:
@@ -90,6 +90,21 @@ def blocknumber_opcode_fn(computation) -> None:
         computation.stack_push_int(computation.state.fuzzed_blocknumber)
     else:
         computation.stack_push_int(computation.state.block_number)
+
+def sort_storage_trace(storage):
+    return dict(sorted(storage.items(), key=lambda item: item[1]))
+
+def trace_load_storage(computation: BaseComputation, slot):
+    # storage_trace[slot] = value
+    value = stack_item_to_hex(computation._stack.values[-1])
+    computation.storage_trace[slot] = value
+
+def trace_set_storage(computation: BaseComputation):
+    # storage_trace[slot] = value
+    slot = stack_item_to_hex(computation._stack.values[-1])
+    value = stack_item_to_hex(computation._stack.values[-2])
+    computation.storage_trace[slot] = value
+    # print('trace set', stack_item_to_hex(slot), stack_item_to_hex(value))
 
 
 @classmethod
@@ -107,6 +122,11 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
         show_debug2 = computation.logger.show_debug2
 
         computation.trace = list()
+        computation.storage_trace = dict()
+        if hasattr(state, 'trace'):
+            computation.trace = state.trace
+
+
         previous_stack = []
         opcode_lookup = computation.opcodes
         for opcode in computation.code:
@@ -129,12 +149,34 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
             memory = None
             previous_pc = computation.code.program_counter
             previous_gas = computation.get_gas_remaining()
+            computation.trace.append(
+                {
+                    "pc": max(0, previous_pc - 1),
+                    "op": opcode_fn.mnemonic,
+                    "depth": computation.msg.depth + 1,
+                    # "error": deepcopy(computation._error),
+                    "stack": previous_stack,
+                    # "memory": memory,
+                    "gas": computation.get_gas_remaining(),
+                    "storage": sort_storage_trace(computation.storage_trace)
+                    # "gas_used_by_opcode": previous_gas - computation.get_gas_remaining()
+                })
             try:
 
                 if opcode == 0x42:  # TIMESTAMP
-                    timestamp_opcode_fn(computation=computation)
+                    opcode_fn(computation=computation)
+                    # timestamp_opcode_fn(computation=computation)
                 elif opcode == 0x43:  # NUMBER
-                    blocknumber_opcode_fn(computation=computation)
+                    opcode_fn(computation=computation)
+                    # blocknumber_opcode_fn(computation=computation)
+                elif opcode == 0x54:  # SLOAD
+                    slot = stack_item_to_hex(computation._stack.values[-1])
+                    opcode_fn(computation=computation)
+                    trace_load_storage(computation, slot)
+                elif opcode == 0x55:  # SSTORE
+                    trace_set_storage(computation)
+                    opcode_fn(computation=computation)
+                else:
                 # elif opcode == 0x31:  # BALANCE
                 #     fuzz_balance_opcode_fn(computation=computation, opcode_fn=opcode_fn)
                 # elif opcode == 0xf1: # CALL
@@ -150,24 +192,27 @@ def fuzz_apply_computation(cls, state, message, transaction_context):
                 #     computation.stack_push_int(start_position)
                 #     opcode_fn(computation=computation)
                 # else:
-                opcode_fn(computation=computation)
+                    opcode_fn(computation=computation)
             except Halt:
                 fuzz_apply_mutator(computation)
                 break
+
             finally:
-                computation.trace.append(
-                    {
-                        "pc": max(0, previous_pc - 1),
-                        "op": opcode_fn.mnemonic,
-                        "depth": computation.msg.depth + 1,
-                        "error": deepcopy(computation._error),
-                        "stack": previous_stack,
-                        "memory": memory,
-                        "gas": computation.get_gas_remaining(),
-                        "gas_used_by_opcode": previous_gas - computation.get_gas_remaining()
-                    }
-                )
+                # computation.trace.append(
+                #     {
+                #         "pc": max(0, previous_pc - 1),
+                #         "op": opcode_fn.mnemonic,
+                #         "depth": computation.msg.depth + 1,
+                #         # "error": deepcopy(computation._error),
+                #         "stack": previous_stack,
+                #         # "memory": memory,
+                #         "gas": computation.get_gas_remaining(),
+                #         "gas_used_by_opcode": previous_gas - computation.get_gas_remaining()
+                #     }
+                # )
                 previous_stack = list(computation._stack.values)
+
+        state.trace = computation.trace
     return computation
 
 

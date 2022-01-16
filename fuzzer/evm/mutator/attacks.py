@@ -31,7 +31,6 @@ def mutate_balance_of(computation: BaseComputation) -> None:
     address = decode_abi(["address"], decode_hex(
         computation.msg.data[4:].hex()))
     to_address = to_checksum_address(computation.msg.storage_address)
-    print('contract: {}, adr: {}, value: {}'.format(to_address, address, return_value))
 
 
 def mutate_get_reserves(computation: BaseComputation, rate: float) -> None:

@@ -106,7 +106,6 @@ class InstrumentedEVM:
         self.mutator_params = params
 
     def set_vm(self, block_identifier='latest'):
-        print('set vm: ', block_identifier)
         _block = None
         if self.w3:
             if block_identifier == 'latest':
@@ -137,6 +136,7 @@ class InstrumentedEVM:
             logging.getLogger('eth.vm.computation.Computation')
             # logging.basicConfig(level=DEBUG2_LEVEL_NUM)
 
+
         return self.vm.state.apply_transaction(tx)
 
 
@@ -145,7 +145,10 @@ class InstrumentedEVM:
                           transaction: SignedTransactionAPI
                           ) -> Tuple[ReceiptAPI, ComputationAPI]:
 
-        
+        for adr, slot in transaction.access_list:
+            self.vm.state.mark_storage_warm(adr, slot)
+        if hasattr(self.vm.state, 'trace'):
+            self.vm.state.trace = list()
         return self.vm.state.apply_transaction(transaction)
 
     def reset(self):

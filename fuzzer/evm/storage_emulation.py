@@ -96,7 +96,7 @@ class EmulatorAccountDB(AccountDB):
             except KeyError:
                 return 0
         else:
-            result = self._remote.getStorageAt(address, slot, self._block_id)
+            result = self._remote.getStorageAt(address, slot, self._block_id - 1)
             result = to_int(result.hex())
             self.set_storage(address, slot, result)
             if self.snapshot != None:
@@ -126,7 +126,7 @@ class EmulatorAccountDB(AccountDB):
         elif not self._remote:
             account = Account()
         else:
-            code = self._remote.getCode(address, self._block_id)
+            code = self._remote.getCode(address, self._block_id - 1)
             if code:
                 code_hash = keccak(code)
                 self._code_storage_emulator[code_hash] = code
@@ -135,8 +135,8 @@ class EmulatorAccountDB(AccountDB):
             else:
                 code_hash = EMPTY_SHA3
             account = Account(
-                int(self._remote.getTransactionCount(address, self._block_id)),
-                self._remote.getBalance(address, self._block_id),
+                int(self._remote.getTransactionCount(address, self._block_id - 1)),
+                self._remote.getBalance(address, self._block_id - 1),
                 BLANK_ROOT_HASH,
                 code_hash
             )
@@ -242,7 +242,16 @@ class EmulatorAccountDB(AccountDB):
         pass
 
     def mark_storage_warm(self, address: Address, slot: int) -> None:
-        return None
+        key = self._get_storage_tracker_key(address, slot)
+        if key not in self._journal_accessed_state:
+            self._journal_accessed_state[key] = b''
+
+    def is_storage_warm(self, address: Address, slot: int) -> bool:
+        key = self._get_storage_tracker_key(address, slot)
+        print('is_storage_warm', to_normalized_address(address),
+              int_to_big_endian(slot).hex(), key in self._journal_accessed_state)
+        return key in self._journal_accessed_state
+
 
 
     def make_state_root(self) -> Hash32:

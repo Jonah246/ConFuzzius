@@ -1,3 +1,5 @@
+from xmlrpc.client import Boolean
+from utils.traces import trace_to_json
 import os
 import sys
 import random
@@ -94,6 +96,12 @@ class MockArgs:
         self.contract = contract
 
 
+def output_trace(data):
+    f = open('/Users/jonah/contract/trace.json', 'w')
+    data = trace_to_json(data)
+    f.write(data)
+    f.close()
+
 # fork from Fuzzer
 class Mutator:
     def __init__(self, test_instrumented_evm: InstrumentedEVM):
@@ -161,27 +169,29 @@ class Mutator:
         return result
 
     def trace_block(
-        self, block_number: BlockNumber
+        self, block_number: BlockNumber, skipped_failed_tx: Optional[Boolean] = True
     ):
         block = self.w3.eth.get_block(block_number)
-        BLOCK_ID = block_number - 1
+        BLOCK_ID = block_number
         self.instrumented_evm.set_vm(BLOCK_ID)
         txs = block['transactions']
-        for tx_hash in txs[:1]:
+        for tx_hash in txs:
             tx = self.w3.eth.get_transaction(tx_hash)
             receipt = self.w3.eth.get_transaction_receipt(tx_hash)
-            print('receipt status:', receipt['status'], tx_hash.hex())
-
-            result = self.run_raw_tx(tx, block)
-            print(result.is_success, receipt['status'])
+            if receipt['status'] != 1 and not skipped_failed_tx:
+                self.instrumented_evm.create_snapshot()
+                result = self.run_raw_tx(tx, block)
+                self.instrumented_evm.restore_from_snapshot()
+            else:
+                result = self.run_raw_tx(tx, block)
 
             if result.is_error and receipt['status'] == 1:
+                print(tx['hash'].hex())
                 print(tx['type'])
                 print(result._error)
                 print('revert', get_revert_reason(result.output))
-
-
-
+                output_trace(result.trace)
+                raise Exception()
 
 instrumented_evm = InstrumentedEVM(settings.RPC_HOST, settings.RPC_PORT)
 instrumented_evm.set_vm_by_name(settings.EVM_VERSION)
