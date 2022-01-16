@@ -13,7 +13,7 @@ from eth_typing import (
     HexStr,
     # TxData
 )
-from web3.types import TxData
+from web3.types import TxData, BlockData
 from z3.z3 import Bool
 
 # from z3 import Solver
@@ -32,6 +32,8 @@ from evm.storage_emulation import BLOCK_ID
 from utils.traces import collect_event, get_revert_reason
 
 from evm.mutator.types import MutatorParams, AttackParams
+from evm.block import get_header_fromblock_data
+from evm.transaction import build_transaction_from_transaction_data
 
 from main import Fuzzer
 
@@ -109,6 +111,7 @@ class Mutator:
     def set_params(self, mutatorParams: MutatorParams):
         self.instrumented_evm.set_mutator_params(mutatorParams)
 
+
     """
         run_tx executes trace_trasaction in the instrumented_evm
         @params: params: MutatorParams indicates the rules for mutator to mutate
@@ -124,13 +127,10 @@ class Mutator:
 
         from_account = to_canonical_address(tx['from'])
         
+        if hasattr(self.instrumented_evm.vm, 'new_unsigned_access_list_transaction'):
+            print("support!!")
         base_unsigned_tx = self.instrumented_evm.vm.create_unsigned_transaction(
-            nonce=tx['nonce'],
-            gas_price=tx['gasPrice'],
-            gas=tx['gas'],
-            to=to_canonical_address(tx['to']),
-            value=tx['value'],
-            data=decode_hex(tx['input'])
+            **tx
         )
         BLOCK_ID = tx.blockNumber
 
@@ -143,7 +143,7 @@ class Mutator:
             debug=False)
         return result
 
-    def run_raw_tx(self, tx: TxData) -> BaseComputation:
+    def run_raw_tx(self, tx: TxData, block: BlockData) -> BaseComputation:
         from_account = to_canonical_address(tx['from'])
         
         base_unsigned_tx = self.instrumented_evm.vm.create_unsigned_transaction(
@@ -155,9 +155,9 @@ class Mutator:
             data=decode_hex(tx['input']),
         )
         # self.instrumented_evm.create_snapshot()
-        result = self.instrumented_evm.execute(
-            SpoofTransaction(base_unsigned_tx, from_=from_account),
-            debug=False)
+        result = self.instrumented_evm.apply_transaction(
+            get_header_fromblock_data(block),
+            build_transaction_from_transaction_data(self.instrumented_evm.vm, tx))
         return result
 
     def trace_block(
@@ -167,15 +167,16 @@ class Mutator:
         BLOCK_ID = block_number - 1
         self.instrumented_evm.set_vm(BLOCK_ID)
         txs = block['transactions']
-        for tx_hash in txs[:4]:
+        for tx_hash in txs[:1]:
             tx = self.w3.eth.get_transaction(tx_hash)
             receipt = self.w3.eth.get_transaction_receipt(tx_hash)
             print('receipt status:', receipt['status'], tx_hash.hex())
 
-            result = self.run_raw_tx(tx)
+            result = self.run_raw_tx(tx, block)
             print(result.is_success, receipt['status'])
 
-            if result.is_error:
+            if result.is_error and receipt['status'] == 1:
+                print(tx['type'])
                 print(result._error)
                 print('revert', get_revert_reason(result.output))
 
@@ -200,7 +201,7 @@ mutator_params = MutatorParams(
 ])
 mutator = Mutator(instrumented_evm,)
 
-mutator.trace_block(9964000)
+mutator.trace_block(13964000)
 # result = mutator.run_tx(tx_hash, mutator_params)
 
 # if not result.is_success:

@@ -146,7 +146,7 @@ class InstrumentedEVM:
                           ) -> Tuple[ReceiptAPI, ComputationAPI]:
 
         
-        return self.vm.apply_transaction(header, transaction)
+        return self.vm.state.apply_transaction(transaction)
 
     def reset(self):
         self.storage_emulator._raw_store_db.wrapped_db.rst()
