@@ -37,7 +37,7 @@ from eth.abc import (
 
 from typing import Tuple
 
-from .storage_emulation import (
+from .forks import (
     ArrowGlacierVMForFuzzTesting,
     FrontierVMForFuzzTesting,
     HomesteadVMForFuzzTesting,
@@ -46,12 +46,13 @@ from .storage_emulation import (
     SpuriousDragonVMForFuzzTesting,
     ByzantiumVMForFuzzTesting,
     PetersburgVMForFuzzTesting,
-    EmulatorAccountDB
 )
+from .storage_emulation import EmulatorAccountDB
+
 
 from eth.vm.forks.london.headers import LondonBlockHeader
 from .mutator.types import MutatorParams
-
+from .block import get_header_fromblock_data
 
 from utils import settings
 from utils.utils import initialize_logger
@@ -121,42 +122,8 @@ class InstrumentedEVM:
         child_block = self.w3.eth.getBlock(block_identifier + 1)
         self._block = _block
         # print(type(_block))
-        if hasattr(_block, 'baseFeePerGas'):
-            block_header = LondonBlockHeader(difficulty=_block.difficulty,
-                                            block_number=_block.number,
-                                            gas_limit=child_block.gasLimit,
-                                            timestamp=child_block.timestamp,
-                                            coinbase=to_canonical_address(_block.miner),  # default value
-                                            parent_hash=_block.parentHash,
-                                            uncles_hash=_block.uncles,
-                                             state_root=_block.stateRoot,
-                                            # state_root = parent_block.stateRoot,
-                                            transaction_root=_block.transactionsRoot,
-                                            receipt_root=_block.receiptsRoot,
-                                            bloom=0,  # default value
-                                            gas_used=0, # set to zero
-                                            extra_data=_block.extraData,
-                                            mix_hash=_block.mixHash,
-                                            nonce=_block.nonce,
-                                            base_fee_per_gas=child_block['baseFeePerGas'],
-                                    )
-        else:
-            block_header = BlockHeader(difficulty=_block.difficulty,
-                                        block_number=_block.number,
-                                        gas_limit=_block.gasLimit,
-                                        timestamp=_block.timestamp,
-                                        coinbase=ZERO_ADDRESS,  # default value
-                                        parent_hash=_block.parentHash,
-                                        uncles_hash=_block.uncles,
-                                        state_root=_block.stateRoot,
-                                        transaction_root=_block.transactionsRoot,
-                                        receipt_root=_block.receiptsRoot,
-                                        bloom=0,  # default value
-                                        gas_used=0,  # set to zero
-                                        extra_data=_block.extraData,
-                                        mix_hash=_block.mixHash,
-                                        nonce=_block.nonce,
-                                    )
+        block_header = get_header_fromblock_data(_block)
+
         # print('get vm:', block_header)
         self.vm = self.chain.get_vm(block_header)
         self.storage_emulator.set_block_identifier(
@@ -179,7 +146,7 @@ class InstrumentedEVM:
                           ) -> Tuple[ReceiptAPI, ComputationAPI]:
 
         
-        return self.vm.state.apply_transaction(transaction)
+        return self.vm.apply_transaction(header, transaction)
 
     def reset(self):
         self.storage_emulator._raw_store_db.wrapped_db.rst()

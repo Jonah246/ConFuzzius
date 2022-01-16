@@ -45,8 +45,8 @@ def mutate_get_reserves(computation: BaseComputation, rate: float) -> None:
     reserve_a, reserve_b, last_update_time = decode_abi(
         output_type, computation.output)
 
-    print('contract: {}, , time: {}, reserve a: {}, reserve b: {}'.format(
-        to_address, last_update_time, reserve_a, reserve_b))
+    # print('contract: {}, , time: {}, reserve a: {}, reserve b: {}'.format(
+    #     to_address, last_update_time, reserve_a, reserve_b))
     reserve_a = int(reserve_a * rate)
     reserve_b = int(reserve_b // rate)
     computation.output = encode_abi(output_type, (reserve_a, reserve_b, last_update_time))
