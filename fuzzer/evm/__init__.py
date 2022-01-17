@@ -145,6 +145,7 @@ class InstrumentedEVM:
                           transaction: SignedTransactionAPI
                           ) -> Tuple[ReceiptAPI, ComputationAPI]:
 
+        self.vm.state.lock_changes()
         for adr, slot in transaction.access_list:
             self.vm.state.mark_storage_warm(adr, slot)
         if hasattr(self.vm.state, 'trace'):

@@ -178,6 +178,7 @@ class Mutator:
         for tx_hash in txs:
             tx = self.w3.eth.get_transaction(tx_hash)
             receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            print('run tx', tx_hash.hex())
             if receipt['status'] != 1 and not skipped_failed_tx:
                 self.instrumented_evm.create_snapshot()
                 result = self.run_raw_tx(tx, block)

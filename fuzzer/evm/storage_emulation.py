@@ -5,7 +5,7 @@ import random
 from eth.abc import BlockHeaderAPI
 
 from hexbytes import HexBytes
-from typing import Optional, Set, cast
+from typing import Optional, Set, cast, Dict
 from copy import deepcopy
 
 from eth import constants
@@ -52,9 +52,17 @@ class EmulatorAccountDB(AccountDB):
         self._block_id = BLOCK_ID
         self._base_fee_per_gas = None
 
-        self._dirty_accounts: Set[Address] = set()
         self._reset_access_counters()
 
+        self._dirty_accounts: Set[Address] = set()
+        self._root_hash_at_last_persist = state_root
+        self._accessed_accounts: Set[Address] = set()
+        self._accessed_bytecodes: Set[Address] = set()
+        self._account_stores: Dict[Address, AccountStorageDatabaseAPI] = {}
+
+
+    def lock_changes(self):
+        self._reset_access_counters()
 
     def set_snapshot(self, snapshot):
         self.snapshot = snapshot
@@ -114,6 +122,8 @@ class EmulatorAccountDB(AccountDB):
         self._storage_emulator[address][slot] = value
 
         self._dirty_accounts.add(address)
+
+        self.mark_storage_warm(address, slot)
 
     def delete_storage(self, address: Address) -> None:
         validate_canonical_address(address, title="Storage Address")
@@ -248,8 +258,6 @@ class EmulatorAccountDB(AccountDB):
 
     def is_storage_warm(self, address: Address, slot: int) -> bool:
         key = self._get_storage_tracker_key(address, slot)
-        print('is_storage_warm', to_normalized_address(address),
-              int_to_big_endian(slot).hex(), key in self._journal_accessed_state)
         return key in self._journal_accessed_state
 
 
